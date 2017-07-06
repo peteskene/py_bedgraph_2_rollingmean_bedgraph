@@ -1,0 +1,122 @@
+import csv
+import pandas as pd
+import pybedtools
+from pybedtools import BedTool
+from pybedtools.contrib.bigwig import bedgraph_to_bigwig
+from pybedtools.helpers import chromsizes_to_file
+from subprocess import check_output
+#set tmp dir
+pybedtools.set_tempdir('/loc/scratch/pskene')
+
+def py_bedgraph_2_rollingmean_bedgraph(bed_file, scaling_factor=1.0, chr_sizes='hg19', window_size=500, generate_bigwig=True):
+    """
+    written by peteskene@gmail.com
+    
+    WARNING: script is slow
+    script modified to make system calls, so lots of intermediary large files saved, may want to clean up
+    
+    takes in a bed file of sequenced reads <chr> <start> <end>
+    -and-
+    a species to generate a chr_sizes file
+    
+    (1) generates chr_sizes file from species and saves file (e.g. file saved 'temp_chr_sizes_hg19')
+    
+    (2) imports bed file and generates a bedgraph with each non-zero position reported in 1 bp windows (e.g. A.bed).
+        Can provide a scaling factor for normalizing the bedgraph as required (provide as float e.g. 1.1456)
+    
+    (3) generates non-overlapping windows across the entire genome
+    
+    (4) maps the bedgraph scores to each of the sliding windows and calculates the mean score per base pair in the window;
+        saves this bedgraph file (auto generates name e.g. A_window_500bp.bg)
+
+    (5) generates a big_wig of the rolling mean bedgraph (optional; auto generates name e.g. A_window_500bp.bw)
+
+    
+    
+    """
+
+    from datetime import datetime
+    startTime = datetime.now()
+    print 'Script started at: ' + str(startTime)
+
+    #read bedgraph_file in as BedTool
+    print 'assumes bed file is sorted'
+    print
+    
+    chr_sizes_filename = 'temp_chr_sizes_' + chr_sizes
+    print 'generating chr_sizes file: ' + chr_sizes_filename
+    chromsizes_to_file(chr_sizes, chr_sizes_filename)
+    print 
+    
+    #need to make bedgraph file such that each non-zero position is reported at with single bp windows (this uses the 'dz' flag,
+    #instead of 'bg' which collapses runs of contiguous scores to reduce file size)
+    #this is SLOW
+    temp_bg_filename = bed_file.replace('.bed', '_temp.bg')
+    
+    temp_str = 'bedtools genomecov -dz -i ' + bed_file + ' -g ' + chr_sizes_filename + ' -scale ' + str(scaling_factor) +' > ' + temp_bg_filename
+    print 'generating bedgraph file with 1 bp windows:'
+    print temp_str
+    check_output(temp_str, shell=True)
+    print 'finished making bedgraph; saved to: ' + temp_bg_filename
+    print
+    
+    #need to insert end position. The form of bedgraph outputted is 3 column and just includes the start position
+    temp_bg_filename_inc_end =  temp_bg_filename.replace('temp.bg', 'temp_inc_end.bg')
+    print 'inserting end position into bedgraph'
+    
+    with open(temp_bg_filename) as myfile:
+        with open(temp_bg_filename_inc_end, 'w') as output:
+            file_output = csv.writer(output, delimiter='\t')
+
+            for line in csv.reader(myfile, delimiter='\t'):
+                file_output.writerow((line[0], line[1], int(line[1])+1, line[2]))
+                    
+    print 'finished inserting end position; saved to: ' + temp_bg_filename_inc_end
+    print
+    
+    
+     
+    #make windows from the chr_sizes file
+    temp_windows_filename = chr_sizes + '_genomic_windows'
+    temp_str = 'bedtools makewindows -g ' + chr_sizes_filename + ' -w ' + str(window_size) +' > ' + temp_windows_filename
+    print 'generating genomic windows on chrom sizes file:'
+    print temp_str
+    check_output(temp_str, shell=True)
+    print
+
+    #map the bedgraph scores on the genomic windows
+    #N.B. as non-zero values are not reported in the bg, need to sum the scores and then divide by the window size
+    #this will represent the average score in the window per base pair
+    print 'mapping bedgraph scores on to genomic windows'   
+    temp_mapped_filename = chr_sizes + '_genomic_windows' + '_' + bed_file + '_mapped'
+    temp_str = 'bedtools map -a ' + temp_windows_filename + ' -b ' + temp_bg_filename_inc_end + ' -c 4 -null 0 -o sum > ' + temp_mapped_filename
+    print temp_str
+    check_output(temp_str, shell=True)    
+    print
+    
+    #need to divide the score column (col4) by the window size
+    #also delete any rows with zero score
+    
+    temp_output_name = bed_file.replace('.bed', '_'+ str(window_size) + 'bp_window.bg')
+    
+    with open(temp_mapped_filename) as myfile:
+        with open(temp_output_name, 'w') as output:
+            file_output = csv.writer(output, delimiter='\t')
+            
+            for line in csv.reader(myfile, delimiter='\t'):
+                if line[3]!=str(0): #skip any zero score rows
+                    file_output.writerow((line[0], line[1], line[2], float(line[3])/500))
+                    
+    print 'generated rolling mean bedgraph file: ' + temp_output_name
+    print
+                    
+    if generate_bigwig==True:
+        temp_bw_filename = temp_output_name.replace('.bg', '.bw')
+        temp_str = 'bedGraphToBigWig ' + temp_output_name + ' ' + chr_sizes_filename + ' ' +  temp_bw_filename
+        check_output(temp_str, shell=True)
+        print 'generated rolling mean bedgraph file: ' + temp_bw_filename
+        print
+                    
+    print 'Time taken: ' + str(datetime.now() - startTime)
+    
+    return 'Done'
